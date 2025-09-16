@@ -390,8 +390,16 @@ public class BiometricPhotoValidationService : IBiometricPhotoValidationService
         using (Bitmap bitmap = ConvertToBitmap(image))
         {
             Rectangle rect = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
-            using Bitmap formattedBitmap = bitmap.Clone(rect, PixelFormat.Format24bppRgb);
-            double pixelationScore = CalculatePixelationScore(formattedBitmap);
+            
+            //using Bitmap formattedBitmap = bitmap.Clone(rect, PixelFormat.Format24bppRgb);
+
+            Bitmap clone = new Bitmap(bitmap.Width, bitmap.Height, PixelFormat.Format24bppRgb);
+            using (Graphics g = Graphics.FromImage(clone))
+            {
+                g.DrawImage(bitmap, new Rectangle(0, 0, clone.Width, clone.Height));
+            }
+
+            double pixelationScore = CalculatePixelationScore(clone);
             return pixelationScore > 20;
         }
     }
@@ -583,9 +591,12 @@ public class BiometricPhotoValidationService : IBiometricPhotoValidationService
 
     private double CalculateLaplacianVariance(Mat grayRegion)
     {
+        MCvScalar stdDev= new MCvScalar();
+        MCvScalar tmp = new MCvScalar();
+
         using Mat laplacian = new Mat();
         CvInvoke.Laplacian(grayRegion, laplacian, DepthType.Cv64F);
-        CvInvoke.MeanStdDev(laplacian, out MCvScalar _, out MCvScalar stdDev);
+        CvInvoke.MeanStdDev(laplacian, ref tmp,  ref stdDev);
         double stdValue = stdDev.V0;
         return stdValue * stdValue;
     }
