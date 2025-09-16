@@ -396,11 +396,13 @@ public class BiometricPhotoValidationService : IBiometricPhotoValidationService
 
     private static bool EvaluateSkinTextureNatural(Mat faceGray)
     {
+        MCvScalar stdDev = new MCvScalar ();
+        MCvScalar tmp = new MCvScalar();
         using Mat blur = new();
         CvInvoke.GaussianBlur(faceGray, blur, new Size(7, 7), 0);
         using Mat texture = new();
         CvInvoke.AbsDiff(faceGray, blur, texture);
-        CvInvoke.MeanStdDev(texture, out _, out MCvScalar stdDev);
+        CvInvoke.MeanStdDev(texture, ref tmp , ref stdDev);
         return stdDev.V0 >= 6;
     }
 
@@ -577,9 +579,11 @@ public class BiometricPhotoValidationService : IBiometricPhotoValidationService
 
     private static double CalculateLaplacianVariance(Mat grayImage)
     {
+        MCvScalar stdDev = new MCvScalar();
+        MCvScalar tmp = new MCvScalar();
         using Mat laplacian = new();
         CvInvoke.Laplacian(grayImage, laplacian, DepthType.Cv64F);
-        CvInvoke.MeanStdDev(laplacian, out _, out MCvScalar stdDev);
+        CvInvoke.MeanStdDev(laplacian, ref tmp, ref stdDev);
         return stdDev.V0 * stdDev.V0;
     }
 
@@ -587,8 +591,8 @@ public class BiometricPhotoValidationService : IBiometricPhotoValidationService
     {
         using Image<Bgr, byte> bgrImage = colorImage.ToImage<Bgr, byte>();
         using Image<Hsv, byte> hsvImage = bgrImage.Convert<Hsv, byte>();
-        MCvScalar average = hsvImage.GetAverage();
-        return average.V1;
+        var  average = hsvImage.GetAverage();
+        return average .V1;
     }
 
     private static double CalculateDarkRatio(Mat region, double threshold)
