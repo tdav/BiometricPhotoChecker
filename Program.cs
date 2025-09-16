@@ -1,6 +1,6 @@
 ﻿using BiometricPhotoChecker;
 
-string photoPath = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "img", "biyo.png");
+string photoPath = Path.Combine(System.Environment.CurrentDirectory, "img", "biyo.png");
 byte[] imageArray = System.IO.File.ReadAllBytes(photoPath);
 
 BiometricPhotoValidationService service = new BiometricPhotoValidationService();

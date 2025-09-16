@@ -8,11 +8,11 @@ using System.Drawing.Imaging;
 
 public class BiometricPhotoValidationService : IBiometricPhotoValidationService
 {
-    private static string faceFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_frontalface_default.xml");
-    private static string smileFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_smile.xml");
-    private static string eyeFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_eye.xml");
-    private static string mouthFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_mcs_mouth.xml");
-    private static string noseFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_mcs_nose.xml");
+    private static string faceFileName = Path.Combine(System.Environment.CurrentDirectory, "haarcascades", "haarcascade_frontalface_default.xml");
+    private static string smileFileName = Path.Combine(System.Environment.CurrentDirectory, "haarcascades", "haarcascade_smile.xml");
+    private static string eyeFileName = Path.Combine(System.Environment.CurrentDirectory, "haarcascades", "haarcascade_eye.xml");
+    private static string mouthFileName = Path.Combine(System.Environment.CurrentDirectory, "haarcascades", "haarcascade_mcs_mouth.xml");
+    private static string noseFileName = Path.Combine(System.Environment.CurrentDirectory, "haarcascades", "haarcascade_mcs_nose.xml");
     private const int MIN_WIDTH = 35; // Minimum genişlik (mm)
     private const int MIN_HEIGHT = 45; // Minimum yükseklik (mm)
 
