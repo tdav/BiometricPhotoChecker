@@ -1,351 +1,698 @@
-﻿using BiometricPhotoChecker;
+using BiometricPhotoChecker;
 using BiometricPhotoChecker.Service;
 using Emgu.CV;
 using Emgu.CV.CvEnum;
 using Emgu.CV.Structure;
+using System;
+using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Imaging;
+using System.IO;
+using System.Linq;
 
 public class BiometricPhotoValidationService : IBiometricPhotoValidationService
 {
-    private static string faceFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_frontalface_default.xml");
-    private static string smileFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_smile.xml");
-    private static string eyeFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_eye.xml");
-    private static string mouthFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_mcs_mouth.xml");
-    private static string noseFileName = Path.Combine(Directory.GetParent(System.Environment.CurrentDirectory).Parent.Parent.FullName, "haarcascades", "haarcascade_mcs_nose.xml");
-    private const int MIN_WIDTH = 35; // Minimum genişlik (mm)
-    private const int MIN_HEIGHT = 45; // Minimum yükseklik (mm)
+    private static readonly string faceFileName = Path.Combine(Directory.GetParent(Environment.CurrentDirectory).Parent!.Parent!.FullName, "haarcascades", "haarcascade_frontalface_default.xml");
+    private static readonly string smileFileName = Path.Combine(Directory.GetParent(Environment.CurrentDirectory).Parent!.Parent!.FullName, "haarcascades", "haarcascade_smile.xml");
+    private static readonly string eyeFileName = Path.Combine(Directory.GetParent(Environment.CurrentDirectory).Parent!.Parent!.FullName, "haarcascades", "haarcascade_eye.xml");
+    private static readonly string mouthFileName = Path.Combine(Directory.GetParent(Environment.CurrentDirectory).Parent!.Parent!.FullName, "haarcascades", "haarcascade_mcs_mouth.xml");
+    private static readonly string noseFileName = Path.Combine(Directory.GetParent(Environment.CurrentDirectory).Parent!.Parent!.FullName, "haarcascades", "haarcascade_mcs_nose.xml");
+
+    private const int MIN_WIDTH = 35;
+    private const int MIN_HEIGHT = 45;
 
     public CheckInfo ValidateBiometricPhoto(byte[] imageBytes)
     {
-        CheckInfo checkInfo = new CheckInfo();
-        checkInfo.IsImageValid = IsImageValid(imageBytes);
-        checkInfo.IsSmileValid = IsSmileValid(imageBytes);
-        checkInfo.IsMouthValid = IsMouthValid(imageBytes);
-        checkInfo.IsNoseValid = IsNoseValid(imageBytes);
-        checkInfo.IsEyesValid = IsEyesValid(imageBytes);
-        checkInfo.IsHeadAndShouldersVisible = IsHeadAndShouldersVisible(imageBytes);
-        checkInfo.IsBackgroundValid = IsBackgroundValid(imageBytes);
-        checkInfo.IsProperLighting = IsProperLighting(imageBytes);
-        checkInfo.IsFacePositionValid = IsFacePositionValid(imageBytes);
-        checkInfo.IsEyePositionValid = IsEyePositionValid(imageBytes);
+        CheckInfo checkInfo = new();
+
+        using Mat colorImage = LoadImage(imageBytes);
+        if (colorImage.IsEmpty)
+        {
+            return checkInfo;
+        }
+
+        checkInfo.IsImageValid = IsImageValid(colorImage);
+
+        using Mat grayImage = new();
+        CvInvoke.CvtColor(colorImage, grayImage, ColorConversion.Bgr2Gray);
+        CvInvoke.EqualizeHist(grayImage, grayImage);
+
+        Rectangle[] faces;
+        using (CascadeClassifier faceCascade = LoadCascadeClassifier(faceFileName))
+        {
+            faces = faceCascade.DetectMultiScale(
+                grayImage,
+                1.1,
+                6,
+                new Size(Math.Max(60, colorImage.Width / 10), Math.Max(60, colorImage.Height / 10)),
+                Size.Empty);
+        }
+
+        checkInfo.IsFaceDetected = faces.Length > 0;
+
+        using Bitmap fullBitmap = ConvertToBitmap(colorImage);
+
+        if (!checkInfo.IsFaceDetected)
+        {
+            PopulateGlobalChecksWithoutFace(colorImage, grayImage, fullBitmap, checkInfo);
+            return checkInfo;
+        }
+
+        Rectangle faceRect = faces.OrderByDescending(r => r.Width * r.Height).First();
+        faceRect = EnsureWithinBounds(faceRect, colorImage.Width, colorImage.Height);
+
+        using Mat faceGray = new(grayImage, faceRect);
+        using Mat faceColor = new(colorImage, faceRect);
+        using Bitmap faceBitmap = ConvertToBitmap(faceColor);
+
+        Rectangle[] eyeRects;
+        using (CascadeClassifier eyeCascade = LoadCascadeClassifier(eyeFileName))
+        {
+            eyeRects = GetProminentEyes(
+                eyeCascade.DetectMultiScale(faceGray, 1.1, 5, new Size(Math.Max(20, faceRect.Width / 10), Math.Max(20, faceRect.Height / 10)), Size.Empty));
+        }
+
+        Rectangle[] noseRects;
+        using (CascadeClassifier noseCascade = LoadCascadeClassifier(noseFileName))
+        {
+            noseRects = noseCascade.DetectMultiScale(faceGray, 1.1, 6, new Size(Math.Max(20, faceRect.Width / 8), Math.Max(20, faceRect.Height / 8)), Size.Empty);
+        }
+
+        Rectangle[] mouthRects;
+        using (CascadeClassifier mouthCascade = LoadCascadeClassifier(mouthFileName))
+        {
+            mouthRects = mouthCascade.DetectMultiScale(faceGray, 1.1, 15, new Size(Math.Max(25, faceRect.Width / 6), Math.Max(20, faceRect.Height / 6)), Size.Empty);
+        }
+
+        Rectangle[] smileRects;
+        using (CascadeClassifier smileCascade = LoadCascadeClassifier(smileFileName))
+        {
+            smileRects = smileCascade.DetectMultiScale(faceGray, 1.2, 22, new Size(Math.Max(25, faceRect.Width / 6), Math.Max(15, faceRect.Height / 8)), Size.Empty);
+        }
+
+        checkInfo.IsEyesValid = eyeRects.Length >= 2;
+        checkInfo.IsNoseValid = noseRects.Length > 0;
+        checkInfo.IsMouthValid = mouthRects.Length > 0;
+        checkInfo.IsFacialExpressionNeutral = smileRects.Length == 0;
+        checkInfo.IsSmileValid = checkInfo.IsFacialExpressionNeutral;
+
+        checkInfo.IsMouthClosed = EvaluateMouthClosed(faceGray, mouthRects);
+        checkInfo.IsMouthValid = checkInfo.IsMouthClosed;
+
+        checkInfo.IsNotBlinking = EvaluateBlinking(faceGray, eyeRects);
+        checkInfo.IsNotLookingSideways = EvaluateLookingStraight(faceRect, eyeRects);
+        checkInfo.IsNotLookingUpOrDown = EvaluateLookingUpOrDown(faceRect, eyeRects);
+        checkInfo.IsFaceOrientationFrontal = EvaluateFaceOrientation(faceRect, eyeRects, noseRects);
+        checkInfo.IsFaceWellLit = EvaluateFaceLighting(faceGray);
+        checkInfo.IsNotOverexposed = EvaluateOverExposure(colorImage);
+        checkInfo.IsProperLighting = checkInfo.IsFaceWellLit && checkInfo.IsNotOverexposed;
+
+        checkInfo.IsWithoutGlasses = EvaluateGlassesAbsence(faceGray, eyeRects);
+        checkInfo.IsGlassesGlareAbsent = EvaluateGlassesGlare(faceBitmap, eyeRects);
+        checkInfo.IsRedEyeAbsent = EvaluateRedEye(faceBitmap, eyeRects);
+
+        checkInfo.IsSkinTextureClear = EvaluateSkinTextureClarity(faceGray);
+        checkInfo.IsSkinTextureNatural = EvaluateSkinTextureNatural(faceGray);
+        checkInfo.IsColorNotFaded = EvaluateColorNotFaded(colorImage);
+        checkInfo.IsSaturationBalanced = EvaluateSaturationBalanced(colorImage);
+        checkInfo.IsSharp = EvaluateSharpness(grayImage);
+        checkInfo.IsNotPixelated = EvaluatePixelation(colorImage);
+
+        checkInfo.IsDistanceNotTooClose = EvaluateDistanceNotTooClose(faceRect, colorImage.Size);
+        checkInfo.IsDistanceNotTooFar = EvaluateDistanceNotTooFar(faceRect, colorImage.Size);
+
+        checkInfo.IsNotShotFromAbove = EvaluateShotFromAbove(faceRect, eyeRects, colorImage.Size);
+        checkInfo.IsNotShotFromBelow = EvaluateShotFromBelow(faceRect, eyeRects, colorImage.Size);
+        checkInfo.IsNotShotFromSide = EvaluateShotFromSide(faceRect, eyeRects, colorImage.Size);
+
+        checkInfo.IsHeadAndShouldersVisible = EvaluateHeadAndShoulders(faceRect, colorImage.Size);
+        checkInfo.IsBackgroundUniform = EvaluateBackgroundUniform(fullBitmap, faceRect);
+        checkInfo.IsBackgroundValid = checkInfo.IsBackgroundUniform;
+
+        checkInfo.IsFacePositionValid = checkInfo.IsFaceOrientationFrontal
+            && checkInfo.IsNotShotFromAbove
+            && checkInfo.IsNotShotFromBelow
+            && checkInfo.IsNotShotFromSide;
+
+        checkInfo.IsEyePositionValid = checkInfo.IsEyesValid
+            && checkInfo.IsNotBlinking
+            && checkInfo.IsNotLookingSideways
+            && checkInfo.IsNotLookingUpOrDown;
+
         return checkInfo;
     }
-    private bool IsFacePositionValid(byte[] imageBytes)
+
+    private static void PopulateGlobalChecksWithoutFace(Mat colorImage, Mat grayImage, Bitmap fullBitmap, CheckInfo checkInfo)
     {
-        using (Mat image = LoadImage(imageBytes))
-        {
-            using (CascadeClassifier faceCascade = LoadCascadeClassifier(faceFileName))
-            {
-                CvInvoke.CvtColor(image, image, ColorConversion.Bgr2Gray);
-                Rectangle[] faces = faceCascade.DetectMultiScale(image, 1.1, 3, Size.Empty, Size.Empty);
+        checkInfo.IsFaceDetected = false;
+        checkInfo.IsSmileValid = false;
+        checkInfo.IsMouthValid = false;
+        checkInfo.IsNoseValid = false;
+        checkInfo.IsEyesValid = false;
+        checkInfo.IsHeadAndShouldersVisible = false;
+        checkInfo.IsFacePositionValid = false;
+        checkInfo.IsEyePositionValid = false;
 
-                if (faces.Length == 0)
-                {
-                    return false; // Yüz tespit edilemedi
-                }
-
-                Rectangle face = faces[0]; // İlk tespit edilen yüzü kullan
-                int imageWidth = image.Width;
-                int imageHeight = image.Height;
-
-                // Yüzün öne bakması gereklidir
-                double faceCenterX = face.X + face.Width / 2;
-                double faceCenterY = face.Y + face.Height / 2;
-                double faceCenterThresholdX = 0.1 * imageWidth; // Yatayda %10 sapma izin verilebilir
-
-                if (Math.Abs(faceCenterX - imageWidth / 2) > faceCenterThresholdX)
-                {
-                    return false; // Yüz yatayda çok fazla sapmış
-                }
-
-                double faceCenterThresholdY = 0.1 * imageHeight; // Dikeyde %10 sapma izin verilebilir
-
-                if (Math.Abs(faceCenterY - imageHeight / 2) > faceCenterThresholdY)
-                {
-                    return false; // Yüz dikeyde çok fazla sapmış
-                }
-
-                return true;
-            }
-        }
+        checkInfo.IsNotOverexposed = EvaluateOverExposure(colorImage);
+        checkInfo.IsFaceWellLit = false;
+        checkInfo.IsProperLighting = false;
+        checkInfo.IsColorNotFaded = EvaluateColorNotFaded(colorImage);
+        checkInfo.IsSaturationBalanced = EvaluateSaturationBalanced(colorImage);
+        checkInfo.IsSharp = EvaluateSharpness(grayImage);
+        checkInfo.IsNotPixelated = EvaluatePixelation(colorImage);
+        checkInfo.IsBackgroundUniform = EvaluateBackgroundUniform(fullBitmap, Rectangle.Empty);
+        checkInfo.IsBackgroundValid = checkInfo.IsBackgroundUniform;
     }
 
-    private bool IsEyePositionValid(byte[] imageBytes)
+    private static bool IsImageValid(Mat image)
     {
-        using (Mat image = LoadImage(imageBytes))
-        {
-            using (CascadeClassifier faceCascade = LoadCascadeClassifier(faceFileName))
-            using (CascadeClassifier eyeCascade = LoadCascadeClassifier(eyeFileName))
-            {
-                CvInvoke.CvtColor(image, image, ColorConversion.Bgr2Gray);
-                Rectangle[] faces = faceCascade.DetectMultiScale(image, 1.1, 3, Size.Empty, Size.Empty);
-
-                if (faces.Length == 0)
-                {
-                    return false; // Yüz tespit edilemedi
-                }
-
-                Rectangle face = faces[0]; // İlk tespit edilen yüzü kullan
-
-                Rectangle[] eyes = eyeCascade.DetectMultiScale(image, 1.1, 3, Size.Empty, Size.Empty);
-
-                if (eyes.Length < 2)
-                {
-                    return false; // İki göz tespit edilemedi
-                }
-
-                Rectangle leftEye = eyes[0]; // İlk gözü kullan
-                Rectangle rightEye = eyes[1]; // İkinci gözü kullan
-                int imageWidth = image.Width;
-                int imageHeight = image.Height;
-
-                // Gözler aynı yükseklikte olmalıdır
-                double leftEyeCenterY = leftEye.Y + leftEye.Height / 2;
-                double rightEyeCenterY = rightEye.Y + rightEye.Height / 2;
-                double eyeCenterThresholdY = 0.05 * imageHeight; // Dikeyde %5 sapma izin verilebilir
-
-                if (Math.Abs(leftEyeCenterY - rightEyeCenterY) > eyeCenterThresholdY)
-                {
-                    return false; // Gözler dikeyde çok fazla sapmış
-                }
-
-                // Gözler arasındaki yatay mesafe belirli bir aralıkta olmalıdır
-                double eyeDistanceThreshold = 0.2 * imageWidth; // Yatayda %20 sapma izin verilebilir
-                double leftEyeCenterX = leftEye.X + leftEye.Width / 2;
-                double rightEyeCenterX = rightEye.X + rightEye.Width / 2;
-                double distanceBetweenEyes = Math.Abs(leftEyeCenterX - rightEyeCenterX);
-
-                if (distanceBetweenEyes < eyeDistanceThreshold)
-                {
-                    return false; // Gözler arası mesafe çok dar
-                }
-
-                // Gözlerin merkezleri yüzün merkezine yakın olmalıdır
-                double eyeCenterToFaceCenterThreshold = 0.2 * imageWidth; // Yatayda %20 sapma izin verilebilir
-                double faceCenterX = imageWidth / 2;
-
-                if (Math.Abs(leftEyeCenterX - faceCenterX) > eyeCenterToFaceCenterThreshold ||
-                    Math.Abs(rightEyeCenterX - faceCenterX) > eyeCenterToFaceCenterThreshold)
-                {
-                    return false; // Gözler yüz merkezine çok uzak
-                }
-
-                return true;
-            }
-        }
-    } 
-
-    private bool IsImageValid(byte[] imageBytes)
-    {
-        using (MemoryStream ms = new MemoryStream(imageBytes))
-        {
-            System.Drawing.Image image = System.Drawing.Image.FromStream(ms);
-            int width = image.Width; // Görüntünün genişliği (mm)
-            int height = image.Height; // Görüntünün yüksekliği (mm)
-
-            return (width >= MIN_WIDTH && height >= MIN_HEIGHT);
-        }
-    }
-    private bool IsSmileValid(byte[] imageBytes)
-    {
-        using (Mat image = LoadImage(imageBytes))
-        {
-            using (CascadeClassifier faceCascade = LoadCascadeClassifier(faceFileName))
-            using (CascadeClassifier smileCascade = LoadCascadeClassifier(smileFileName))
-            {
-                CvInvoke.CvtColor(image, image, ColorConversion.Bgr2Gray);
-
-                Rectangle[] faces = faceCascade.DetectMultiScale(image, 1.1, 3, Size.Empty, Size.Empty);
-
-                foreach (Rectangle face in faces)
-                {
-                    Mat faceRegion = new Mat(image, face);
-                    CvInvoke.EqualizeHist(faceRegion, faceRegion); // Histogram eşitleme uygula
-
-                    Rectangle[] smiles = smileCascade.DetectMultiScale(faceRegion, 1.8, 20, Size.Empty, Size.Empty);
-
-                    foreach (Rectangle smile in smiles)
-                    {
-                        // Gülümseme tespiti bulunduğunda false döndürün
-                        return false;
-                    }
-                }
-            }
-        }
-
-        // Gülümseme tespiti bulunamadığında veya yüz tespiti yapılamadığında true döndürün
-        return true;
+        return image.Width >= MIN_WIDTH && image.Height >= MIN_HEIGHT;
     }
 
-
-    private bool IsEyesValid(byte[] imageBytes)
+    private static bool EvaluateMouthClosed(Mat faceGray, Rectangle[] mouthRects)
     {
-        using (Mat image = LoadImage(imageBytes))
+        if (mouthRects.Length == 0)
         {
-            using (CascadeClassifier eyeCascade = LoadCascadeClassifier(eyeFileName))
-            {
-                CvInvoke.CvtColor(image, image, ColorConversion.Bgr2Gray);
-
-                Rectangle[] eyes = eyeCascade.DetectMultiScale(image, 1.1, 3, Size.Empty, Size.Empty);
-
-                return eyes.Length >= 2;
-            }
+            return true;
         }
-    }
-    private bool IsMouthValid(byte[] imageBytes)
-    {
-        using (Mat image = LoadImage(imageBytes))
+
+        Rectangle mouthRect = mouthRects.OrderByDescending(r => r.Width * r.Height).First();
+        mouthRect = EnsureWithinBounds(mouthRect, faceGray.Width, faceGray.Height);
+
+        if (mouthRect.Width == 0 || mouthRect.Height == 0)
         {
-            using (CascadeClassifier mouthCascade = LoadCascadeClassifier(mouthFileName))
-            {
-                CvInvoke.CvtColor(image, image, ColorConversion.Bgr2Gray);
-
-                Rectangle[] mouths = mouthCascade.DetectMultiScale(image, 1.1, 3, Size.Empty, Size.Empty);
-
-                return mouths.Length >= 1;
-            }
+            return true;
         }
+
+        using Mat mouthRegion = new(faceGray, mouthRect);
+        CvInvoke.GaussianBlur(mouthRegion, mouthRegion, new Size(3, 3), 0);
+        double darkRatio = CalculateDarkRatio(mouthRegion, 55);
+        double aspect = (double)mouthRect.Height / Math.Max(1, mouthRect.Width);
+
+        return darkRatio < 0.28 && aspect < 0.45;
     }
 
-    private bool IsNoseValid(byte[] imageBytes)
+    private static bool EvaluateBlinking(Mat faceGray, Rectangle[] eyeRects)
     {
-        using (Mat image = LoadImage(imageBytes))
+        if (eyeRects.Length < 2)
         {
-            using (CascadeClassifier noseCascade = LoadCascadeClassifier(noseFileName))
-            {
-                CvInvoke.CvtColor(image, image, ColorConversion.Bgr2Gray);
-
-                Rectangle[] noses = noseCascade.DetectMultiScale(image, 1.1, 3, Size.Empty, Size.Empty);
-
-                return noses.Length >= 1;
-            }
+            return false;
         }
-    }
-    private bool IsHeadAndShouldersVisible(byte[] imageBytes)
-    {
-        using (Mat image = LoadImage(imageBytes))
+
+        int validEyes = 0;
+        foreach (Rectangle rectRaw in eyeRects)
         {
-            using (CascadeClassifier faceCascade = LoadCascadeClassifier(faceFileName))
+            Rectangle eyeRect = EnsureWithinBounds(rectRaw, faceGray.Width, faceGray.Height);
+            if (eyeRect.Width == 0 || eyeRect.Height == 0)
             {
-                CvInvoke.CvtColor(image, image, ColorConversion.Bgr2Gray);
+                continue;
+            }
 
-                Rectangle[] faces = faceCascade.DetectMultiScale(image, 1.1, 3, Size.Empty, Size.Empty);
+            using Mat eyeRegion = new(faceGray, eyeRect);
+            double aspect = (double)eyeRect.Height / Math.Max(1, eyeRect.Width);
+            double darkRatio = CalculateDarkRatio(eyeRegion, 60);
+            bool eyeOpen = aspect > 0.17 && darkRatio < 0.65;
+            if (!eyeOpen)
+            {
+                return false;
+            }
 
-                foreach (Rectangle face in faces)
-                {
-                    Mat faceRegion = new Mat(image, face); 
+            validEyes++;
+        }
 
-                    bool headAndShouldersVisible = CheckHeadAndShoulders(faceRegion);
+        return validEyes >= 2;
+    }
 
-                    if (!headAndShouldersVisible)
-                    {
-                        return false;
-                    }
-                }
+    private static bool EvaluateLookingStraight(Rectangle faceRect, Rectangle[] eyeRects)
+    {
+        if (eyeRects.Length < 2)
+        {
+            return false;
+        }
+
+        Rectangle left = eyeRects[0];
+        Rectangle right = eyeRects[1];
+
+        double leftCenter = left.X + left.Width / 2.0;
+        double rightCenter = right.X + right.Width / 2.0;
+        double faceCenter = faceRect.Width / 2.0;
+
+        double midPoint = (leftCenter + rightCenter) / 2.0;
+        double diff = Math.Abs(midPoint - faceCenter) / Math.Max(1, faceRect.Width);
+        double symmetry = Math.Abs((faceCenter - leftCenter) - (rightCenter - faceCenter)) / Math.Max(1, faceRect.Width);
+
+        return diff < 0.12 && symmetry < 0.12;
+    }
+
+    private static bool EvaluateLookingUpOrDown(Rectangle faceRect, Rectangle[] eyeRects)
+    {
+        if (eyeRects.Length < 2)
+        {
+            return false;
+        }
+
+        Rectangle left = eyeRects[0];
+        Rectangle right = eyeRects[1];
+        double averageEyeY = (left.Y + left.Height / 2.0 + right.Y + right.Height / 2.0) / 2.0;
+        double normalized = averageEyeY / Math.Max(1, faceRect.Height);
+
+        return normalized > 0.3 && normalized < 0.6;
+    }
+
+    private static bool EvaluateFaceOrientation(Rectangle faceRect, Rectangle[] eyeRects, Rectangle[] noseRects)
+    {
+        if (noseRects.Length > 0)
+        {
+            Rectangle nose = noseRects.OrderByDescending(r => r.Width * r.Height).First();
+            double noseCenter = nose.X + nose.Width / 2.0;
+            double faceCenter = faceRect.Width / 2.0;
+            double diff = Math.Abs(noseCenter - faceCenter) / Math.Max(1, faceRect.Width);
+            return diff < 0.15;
+        }
+
+        if (eyeRects.Length >= 2)
+        {
+            Rectangle left = eyeRects[0];
+            Rectangle right = eyeRects[1];
+            double midPoint = (left.X + left.Width / 2.0 + right.X + right.Width / 2.0) / 2.0;
+            double faceCenter = faceRect.Width / 2.0;
+            double diff = Math.Abs(midPoint - faceCenter) / Math.Max(1, faceRect.Width);
+            return diff < 0.15;
+        }
+
+        return false;
+    }
+
+    private static bool EvaluateFaceLighting(Mat faceGray)
+    {
+        MCvScalar mean = CvInvoke.Mean(faceGray);
+        return mean.V0 >= 90;
+    }
+
+    private static bool EvaluateGlassesAbsence(Mat faceGray, Rectangle[] eyeRects)
+    {
+        if (eyeRects.Length == 0)
+        {
+            return true;
+        }
+
+        double totalDensity = 0;
+        int validEyes = 0;
+
+        foreach (Rectangle rectRaw in eyeRects)
+        {
+            Rectangle eyeRect = EnsureWithinBounds(rectRaw, faceGray.Width, faceGray.Height);
+            if (eyeRect.Width == 0 || eyeRect.Height == 0)
+            {
+                continue;
+            }
+
+            using Mat eyeRegion = new(faceGray, eyeRect);
+            using Mat edges = new();
+            CvInvoke.Canny(eyeRegion, edges, 50, 150);
+            double density = CvInvoke.CountNonZero(edges) / (double)(eyeRect.Width * eyeRect.Height);
+            totalDensity += density;
+            validEyes++;
+        }
+
+        if (validEyes == 0)
+        {
+            return true;
+        }
+
+        double averageDensity = totalDensity / validEyes;
+        return averageDensity < 0.32;
+    }
+
+    private static bool EvaluateGlassesGlare(Bitmap faceBitmap, Rectangle[] eyeRects)
+    {
+        if (eyeRects.Length == 0)
+        {
+            return true;
+        }
+
+        foreach (Rectangle rectRaw in eyeRects)
+        {
+            Rectangle eyeRect = EnsureWithinBounds(rectRaw, faceBitmap.Width, faceBitmap.Height);
+            if (eyeRect.Width == 0 || eyeRect.Height == 0)
+            {
+                continue;
+            }
+
+            double brightRatio = GetBrightPixelRatio(faceBitmap, eyeRect, 230);
+            if (brightRatio > 0.18)
+            {
+                return false;
             }
         }
 
         return true;
     }
 
-    private bool CheckHeadAndShoulders(Mat faceRegion)
+    private static bool EvaluateRedEye(Bitmap faceBitmap, Rectangle[] eyeRects)
     {
-        // Yüz bölgesinin tamamının beyaz piksellerini sayın
-        int totalPixels = faceRegion.Width * faceRegion.Height;
-        int whitePixels = CvInvoke.CountNonZero(faceRegion);
-        double visibleArea = (double)whitePixels / totalPixels;
-
-        // Baş ve omuzlar en az %90 görünürse true döndürün (eşik değeri değiştirilebilir)
-        return (visibleArea >= 0.90);
-    }
-
-
-    private bool IsBackgroundValid(byte[] imageBytes)
-    {
-        using (Mat image = LoadImage(imageBytes))
+        if (eyeRects.Length == 0)
         {
-            Bitmap imageBM = ConvertToBitmap(image);
-            int bgRectWidth = image.Width / 10;
-            int bgRectHeight = image.Height / 10;
-
-            Rectangle topLeftRect = new Rectangle(5, 5, bgRectWidth, bgRectHeight);
-            Color averageColorTopLeft = CalculateAverageColor(imageBM, topLeftRect);
-
-            Rectangle topRightRect = new Rectangle(image.Width - bgRectWidth - 5, 5, bgRectWidth, bgRectHeight);
-            Color averageColorTopRight = CalculateAverageColor(imageBM, topRightRect);
-
-            Color RGB = Color.FromArgb((int)(averageColorTopLeft.R + averageColorTopRight.R) / 2, (int)(averageColorTopLeft.G + averageColorTopRight.G) / 2, (int)(averageColorTopLeft.B + averageColorTopRight.B) / 2);
-
-            return (RGB.R >= 200 && RGB.G >= 200 && RGB.B >= 200);
+            return true;
         }
-    }
 
-    private Color CalculateAverageColor(Bitmap imageBM, Rectangle rect)
-    {
-        double R = 0;
-        double G = 0;
-        double B = 0;
-
-        for (int x = rect.X; x < rect.X + rect.Width; x++)
+        foreach (Rectangle rectRaw in eyeRects)
         {
-            for (int y = rect.Y; y < rect.Y + rect.Height; y++)
+            Rectangle eyeRect = EnsureWithinBounds(rectRaw, faceBitmap.Width, faceBitmap.Height);
+            if (eyeRect.Width == 0 || eyeRect.Height == 0)
             {
-                Color pixelColor = imageBM.GetPixel(x, y);
-                R = R + pixelColor.R;
-                G = G + pixelColor.G;
-                B = B + pixelColor.B;
+                continue;
             }
-        }
 
-        R = R / (rect.Height * rect.Width);
-        G = G / (rect.Height * rect.Width);
-        B = B / (rect.Height * rect.Width);
+            int totalPixels = eyeRect.Width * eyeRect.Height;
+            int redPixels = 0;
 
-        return Color.FromArgb((int)R, (int)G, (int)B);
-    }
-
-    private bool IsProperLighting(byte[] imageBytes)
-    {
-        using (MemoryStream ms = new MemoryStream(imageBytes))
-        {
-            Bitmap image = new Bitmap(ms);
-
-            double totalBrightness = 0;
-
-            for (int x = 0; x < image.Width; x++)
+            for (int x = eyeRect.X; x < eyeRect.Right; x++)
             {
-                for (int y = 0; y < image.Height; y++)
+                for (int y = eyeRect.Y; y < eyeRect.Bottom; y++)
                 {
-                    Color pixelColor = image.GetPixel(x, y);
-                    totalBrightness += (0.299 * pixelColor.R + 0.587 * pixelColor.G + 0.114 * pixelColor.B);
+                    Color pixel = faceBitmap.GetPixel(x, y);
+                    if (pixel.R > 90 && pixel.R > pixel.G * 1.5 && pixel.R > pixel.B * 1.5)
+                    {
+                        redPixels++;
+                    }
                 }
             }
 
-            double averageBrightness = totalBrightness / (image.Width * image.Height);
-
-            return (averageBrightness >= 80 && averageBrightness <= 240);
+            double ratio = totalPixels == 0 ? 0 : redPixels / (double)totalPixels;
+            if (ratio > 0.12)
+            {
+                return false;
+            }
         }
+
+        return true;
     }
 
-    private Mat LoadImage(byte[] imageBytes)
+    private static bool EvaluateSkinTextureClarity(Mat faceGray)
     {
-        Mat image = new Mat();
+        double variance = CalculateLaplacianVariance(faceGray);
+        return variance >= 45;
+    }
+
+    private static bool EvaluateSkinTextureNatural(Mat faceGray)
+    {
+        MCvScalar stdDev = new MCvScalar ();
+        MCvScalar tmp = new MCvScalar();
+        using Mat blur = new();
+        CvInvoke.GaussianBlur(faceGray, blur, new Size(7, 7), 0);
+        using Mat texture = new();
+        CvInvoke.AbsDiff(faceGray, blur, texture);
+        CvInvoke.MeanStdDev(texture, ref tmp , ref stdDev);
+        return stdDev.V0 >= 6;
+    }
+
+    private static bool EvaluateColorNotFaded(Mat colorImage)
+    {
+        double avgSaturation = CalculateAverageSaturation(colorImage);
+        return avgSaturation >= 40;
+    }
+
+    private static bool EvaluateSaturationBalanced(Mat colorImage)
+    {
+        double avgSaturation = CalculateAverageSaturation(colorImage);
+        return avgSaturation >= 40 && avgSaturation <= 200;
+    }
+
+    private static bool EvaluateSharpness(Mat grayImage)
+    {
+        double variance = CalculateLaplacianVariance(grayImage);
+        return variance >= 80;
+    }
+
+    private static bool EvaluatePixelation(Mat colorImage)
+    {
+        if (colorImage.Width < 8 || colorImage.Height < 8)
+        {
+            return false;
+        }
+
+        Size downSize = new(Math.Max(2, colorImage.Width / 4), Math.Max(2, colorImage.Height / 4));
+        using Mat small = new();
+        CvInvoke.Resize(colorImage, small, downSize, 0, 0, Inter.Area);
+        using Mat upscaled = new();
+        CvInvoke.Resize(small, upscaled, colorImage.Size, 0, 0, Inter.Linear);
+        using Mat diff = new();
+        CvInvoke.AbsDiff(colorImage, upscaled, diff);
+        using Mat diffGray = new();
+        CvInvoke.CvtColor(diff, diffGray, ColorConversion.Bgr2Gray);
+        MCvScalar mean = CvInvoke.Mean(diffGray);
+        return mean.V0 >= 12;
+    }
+
+    private static bool EvaluateOverExposure(Mat colorImage)
+    {
+        using Mat gray = new();
+        CvInvoke.CvtColor(colorImage, gray, ColorConversion.Bgr2Gray);
+        using Mat mask = new();
+        CvInvoke.Threshold(gray, mask, 245, 255, ThresholdType.Binary);
+        double brightPixels = CvInvoke.CountNonZero(mask);
+        double totalPixels = colorImage.Width * colorImage.Height;
+        return brightPixels / Math.Max(1, totalPixels) < 0.02;
+    }
+
+    private static bool EvaluateDistanceNotTooClose(Rectangle faceRect, Size imageSize)
+    {
+        double ratio = faceRect.Height / (double)Math.Max(1, imageSize.Height);
+        return ratio <= 0.7;
+    }
+
+    private static bool EvaluateDistanceNotTooFar(Rectangle faceRect, Size imageSize)
+    {
+        double ratio = faceRect.Height / (double)Math.Max(1, imageSize.Height);
+        return ratio >= 0.25;
+    }
+
+    private static bool EvaluateShotFromAbove(Rectangle faceRect, Rectangle[] eyeRects, Size imageSize)
+    {
+        if (eyeRects.Length >= 2)
+        {
+            Rectangle left = eyeRects[0];
+            Rectangle right = eyeRects[1];
+            double averageEyeY = (left.Y + left.Height / 2.0 + right.Y + right.Height / 2.0) / 2.0;
+            double normalized = averageEyeY / Math.Max(1, faceRect.Height);
+            return normalized >= 0.25;
+        }
+
+        return faceRect.Y > imageSize.Height * 0.05;
+    }
+
+    private static bool EvaluateShotFromBelow(Rectangle faceRect, Rectangle[] eyeRects, Size imageSize)
+    {
+        if (eyeRects.Length >= 2)
+        {
+            Rectangle left = eyeRects[0];
+            Rectangle right = eyeRects[1];
+            double averageEyeY = (left.Y + left.Height / 2.0 + right.Y + right.Height / 2.0) / 2.0;
+            double normalized = averageEyeY / Math.Max(1, faceRect.Height);
+            return normalized <= 0.7;
+        }
+
+        return faceRect.Bottom < imageSize.Height * 0.95;
+    }
+
+    private static bool EvaluateShotFromSide(Rectangle faceRect, Rectangle[] eyeRects, Size imageSize)
+    {
+        if (eyeRects.Length >= 2)
+        {
+            Rectangle left = eyeRects[0];
+            Rectangle right = eyeRects[1];
+            double averageEyeX = (left.X + left.Width / 2.0 + right.X + right.Width / 2.0) / 2.0;
+            double normalized = averageEyeX / Math.Max(1, faceRect.Width);
+            return normalized > 0.3 && normalized < 0.7;
+        }
+
+        return faceRect.Left > imageSize.Width * 0.05 && faceRect.Right < imageSize.Width * 0.95;
+    }
+
+    private static bool EvaluateHeadAndShoulders(Rectangle faceRect, Size imageSize)
+    {
+        double heightRatio = faceRect.Height / (double)Math.Max(1, imageSize.Height);
+        double widthRatio = faceRect.Width / (double)Math.Max(1, imageSize.Width);
+        bool centeredHorizontally = faceRect.Left > imageSize.Width * 0.1 && faceRect.Right < imageSize.Width * 0.9;
+        bool verticalPosition = faceRect.Top > imageSize.Height * 0.05 && faceRect.Bottom < imageSize.Height * 0.95;
+        return heightRatio >= 0.35 && heightRatio <= 0.7 && widthRatio >= 0.25 && widthRatio <= 0.6 && centeredHorizontally && verticalPosition;
+    }
+
+    private static bool EvaluateBackgroundUniform(Bitmap imageBitmap, Rectangle faceRect)
+    {
+        if (imageBitmap.Width == 0 || imageBitmap.Height == 0)
+        {
+            return false;
+        }
+
+        int sampleWidth = Math.Max(10, imageBitmap.Width / 8);
+        int sampleHeight = Math.Max(10, imageBitmap.Height / 8);
+
+        List<Rectangle> sampleAreas = new()
+        {
+            new Rectangle(0, 0, sampleWidth, sampleHeight),
+            new Rectangle(imageBitmap.Width - sampleWidth, 0, sampleWidth, sampleHeight),
+            new Rectangle(0, imageBitmap.Height - sampleHeight, sampleWidth, sampleHeight),
+            new Rectangle(imageBitmap.Width - sampleWidth, imageBitmap.Height - sampleHeight, sampleWidth, sampleHeight),
+            new Rectangle((imageBitmap.Width - sampleWidth) / 2, 0, sampleWidth, sampleHeight),
+            new Rectangle((imageBitmap.Width - sampleWidth) / 2, imageBitmap.Height - sampleHeight, sampleWidth, sampleHeight)
+        };
+
+        List<Color> samples = new();
+
+        foreach (Rectangle rect in sampleAreas)
+        {
+            Rectangle adjusted = EnsureWithinBounds(rect, imageBitmap.Width, imageBitmap.Height);
+            if (adjusted.Width == 0 || adjusted.Height == 0)
+            {
+                continue;
+            }
+
+            if (faceRect != Rectangle.Empty && adjusted.IntersectsWith(faceRect))
+            {
+                continue;
+            }
+
+            samples.Add(CalculateAverageColor(imageBitmap, adjusted));
+        }
+
+        if (samples.Count < 2)
+        {
+            return false;
+        }
+
+        double maxDistance = 0;
+        for (int i = 0; i < samples.Count; i++)
+        {
+            for (int j = i + 1; j < samples.Count; j++)
+            {
+                double distance = ColorDistance(samples[i], samples[j]);
+                if (distance > maxDistance)
+                {
+                    maxDistance = distance;
+                }
+            }
+        }
+
+        return maxDistance < 25;
+    }
+
+    private static double CalculateLaplacianVariance(Mat grayImage)
+    {
+        MCvScalar stdDev = new MCvScalar();
+        MCvScalar tmp = new MCvScalar();
+        using Mat laplacian = new();
+        CvInvoke.Laplacian(grayImage, laplacian, DepthType.Cv64F);
+        CvInvoke.MeanStdDev(laplacian, ref tmp, ref stdDev);
+        return stdDev.V0 * stdDev.V0;
+    }
+
+    private static double CalculateAverageSaturation(Mat colorImage)
+    {
+        using Image<Bgr, byte> bgrImage = colorImage.ToImage<Bgr, byte>();
+        using Image<Hsv, byte> hsvImage = bgrImage.Convert<Hsv, byte>();
+        var  average = hsvImage.GetAverage();
+        return average .V1;
+    }
+
+    private static double CalculateDarkRatio(Mat region, double threshold)
+    {
+        using Mat binary = new();
+        CvInvoke.Threshold(region, binary, threshold, 255, ThresholdType.BinaryInv);
+        double darkPixels = CvInvoke.CountNonZero(binary);
+        double totalPixels = region.Width * region.Height;
+        return darkPixels / Math.Max(1, totalPixels);
+    }
+
+    private static Rectangle EnsureWithinBounds(Rectangle rect, int maxWidth, int maxHeight)
+    {
+        int x = Math.Clamp(rect.X, 0, Math.Max(0, maxWidth - 1));
+        int y = Math.Clamp(rect.Y, 0, Math.Max(0, maxHeight - 1));
+        int width = Math.Clamp(rect.Width, 0, Math.Max(0, maxWidth - x));
+        int height = Math.Clamp(rect.Height, 0, Math.Max(0, maxHeight - y));
+        return new Rectangle(x, y, width, height);
+    }
+
+    private static Rectangle[] GetProminentEyes(Rectangle[] eyeRects)
+    {
+        return eyeRects
+            .OrderByDescending(r => r.Width * r.Height)
+            .Take(2)
+            .OrderBy(r => r.X)
+            .ToArray();
+    }
+
+    private static double GetBrightPixelRatio(Bitmap bitmap, Rectangle rect, byte threshold)
+    {
+        long brightPixels = 0;
+        long totalPixels = Math.Max(1, rect.Width * rect.Height);
+
+        for (int x = rect.X; x < rect.Right; x++)
+        {
+            for (int y = rect.Y; y < rect.Bottom; y++)
+            {
+                Color pixel = bitmap.GetPixel(x, y);
+                double brightness = 0.299 * pixel.R + 0.587 * pixel.G + 0.114 * pixel.B;
+                if (brightness >= threshold)
+                {
+                    brightPixels++;
+                }
+            }
+        }
+
+        return brightPixels / (double)totalPixels;
+    }
+
+    private static Color CalculateAverageColor(Bitmap bitmap, Rectangle rect)
+    {
+        long r = 0;
+        long g = 0;
+        long b = 0;
+        long total = 0;
+
+        for (int x = rect.X; x < rect.Right; x++)
+        {
+            for (int y = rect.Y; y < rect.Bottom; y++)
+            {
+                Color pixel = bitmap.GetPixel(x, y);
+                r += pixel.R;
+                g += pixel.G;
+                b += pixel.B;
+                total++;
+            }
+        }
+
+        if (total == 0)
+        {
+            return Color.Black;
+        }
+
+        return Color.FromArgb((int)(r / total), (int)(g / total), (int)(b / total));
+    }
+
+    private static double ColorDistance(Color c1, Color c2)
+    {
+        double dr = c1.R - c2.R;
+        double dg = c1.G - c2.G;
+        double db = c1.B - c2.B;
+        return Math.Sqrt(dr * dr + dg * dg + db * db);
+    }
+
+    private static Mat LoadImage(byte[] imageBytes)
+    {
+        Mat image = new();
         CvInvoke.Imdecode(imageBytes, ImreadModes.Color, image);
         return image;
     }
 
-    private CascadeClassifier LoadCascadeClassifier(string fileName)
+    private static CascadeClassifier LoadCascadeClassifier(string fileName)
     {
         return new CascadeClassifier(fileName);
     }
 
-    private Bitmap ConvertToBitmap(Mat image)
+    private static Bitmap ConvertToBitmap(Mat image)
     {
-        using (MemoryStream ms = new MemoryStream())
-        {
-            image.ToImage<Bgr, byte>().ToBitmap().Save(ms, ImageFormat.Jpeg);
-            return new Bitmap(ms);
-        }
+        using Image<Bgr, byte> frame = image.ToImage<Bgr, byte>();
+        return frame.ToBitmap();
     }
 }
